@@ -144,8 +144,6 @@ class Quiz
             } catch (Exception $ex) {
                 throw new Exception("Error parsing answers in question $questionNumber", null, $ex->getMessage());
             }
-
-            //$this->Questions[$questionNumber] = new Question();
             $this->Questions[$questionNumber] = new Question($questionNumber, $questionText, $answers['answers'], $answers['attachments']);
         endforeach;
         return $this->Questions;
@@ -218,13 +216,14 @@ class quizParser
 
 }
 
-error_reporting(E_ALL & ~E_NOTICE & ~E_USER_NOTICE);
+error_reporting(E_ALL & ~E_NOTICE & ~E_USER_NOTICE); // Ignore notices we throw in quizParser to not screw up the headers
 // Include Composer autoloader if not already done.
 include 'vendor/autoload.php';
 // Parse pdf file and build necessary objects.
 $parser = new \Smalot\PdfParser\Parser();
 
 /*
+// run a single catalog for troubleshooting
 $quiz = new Quiz('./pdf/PPL(A)/ECQB-PPL-40-COM-PPLA-DE.pdf', $parser);
 header('Content-Type: application/json');
 echo $quiz->getJson();
@@ -235,8 +234,4 @@ $quizParser = new quizParser('./pdf/PPL(A)/', $parser);
 $quizes = $quizParser->parseDirectory();
 header('Content-Type: application/json');
 echo json_encode($quizes);
-die();
-$quiz = new Quiz('./pdf/PPL(A)/ECQB-PPL-90-NAV-PPLA-DE-DE.pdf', $parser);
-header('Content-Type: application/json');
-echo $quiz->getJson();
 ?>
