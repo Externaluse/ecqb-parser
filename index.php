@@ -1,4 +1,36 @@
 <?php
+class XObjectFilter
+{
+    /**
+    * remove duplicate attachments - most images are stored twice in the PDF
+    *
+    * @param array $attachments
+    */
+    public static function reduceDuplicateAttachments(array $attachments)
+    {
+        $temp = array_unique(array_column($attachments, 'Content'));
+        return array_intersect_key($attachments, $temp);
+    }
+    /**
+    * Extension method to retrieve objects by type from an individual page object
+    *
+    * @param mixed $XObjects
+    * @param mixed $type
+    * @param mixed $subtype
+    */
+    public static function getObjectsByType($XObjects, $type, $subtype = null)
+    {
+        $objects = [];
+        foreach ($XObjects as $id => $object) {
+            if ($object->getHeader()->get('Type') == $type &&
+                (null === $subtype || $object->getHeader()->get('Subtype') == $subtype)
+            ) {
+                $objects[$id] = $object;
+            }
+        }
+        return $objects;
+    }
+}
 class TextCleaner
 {
     const Whitespace = array("\t", "\n", "\r\n");
@@ -7,7 +39,28 @@ class TextCleaner
         return str_replace(self::Whitespace, '', trim($input));
     }
 }
+class Attachment {
+    public $Details = array();
+    public $Content = '';
 
+    public function __construct($details, $content)
+    {
+        $this->Details = $details;
+        $this->Content = base64_encode($content);
+    }
+    public function __toString()
+    {
+        return sprintf('<img src="data:image/jpg;base64,%s"></img><!--%s-->', $this->Content, print_r($this->Details, true));
+    }
+    public static function createFromXObject($XObject)
+    {
+        $imageInfo = $XObject->getDetails();
+        if ($imageInfo['Filter'] !== 'DCTDecode') :
+            return new self();
+        endif;
+        return new self($imageInfo, $XObject->getContent());
+    }
+}
 class Answer
 {
     public $Text = '';
@@ -33,7 +86,7 @@ class Question
         $this->Number = $number;
         $this->Text = TextCleaner::Clean($text);
         $this->Answers = $answers;
-        if (!is_null($attachments) && is_array($attachments)) :
+        if (!is_null($attachments)) :
             $this->Attachments = $attachments;
         endif;
         return $this;
@@ -52,6 +105,8 @@ class Question
 class Quiz
 {
     private $Questions = array();
+    private $Details = array();
+    private $Attachments = array();
     private $sourceFile = '';
     private $parser = null;
     private $fullText = '';
@@ -63,6 +118,7 @@ class Quiz
         '(P\.\))', //matches P.) points score
     );
     private $regexIntro = '^(.+?)';
+    private $regexAttachments = '#Anlage\s+(\d{1,2})#i'; //Anlagen zu den Aufgaben\t \t  \nv20\t20.2 \t \t1 \t\nAnlage 1\t \t\n
     private $skipPages = 2; // how many pages to skip; most have two
     private $numberOfQuestions = 0;
 
@@ -74,6 +130,10 @@ class Quiz
     {
         return sprintf('#%s%s#%s', $this->regexIntro, join('', $this->regex), $this->regexOptions);
     }
+    private function getAttachmentPattern()
+    {
+        return $this->regexAttachments;
+    }
 
     public function __construct($sourceFile, $parser, $skipPages = null)
     {
@@ -83,6 +143,10 @@ class Quiz
             $this->skipPages = $skipPages;
         endif;
         $this->parsePdf();
+    }
+    public function getDetails()
+    {
+        return $this->Details;
     }
     public function getQuestions()
     {
@@ -97,9 +161,14 @@ class Quiz
         $answerIntro = trim($answers[0]);
         if ($answerIntro === '') :
             unset($answers[0]);
-        // capture a "Siehe Anlage 1" that follows a question
+        // capture a "Siehe Anlage 1" that follows a question. If that attachment exists, add it's contents. Formatter (JSON etc) should pick an output format
         elseif (is_numeric(($attachment = filter_var($answerIntro, FILTER_SANITIZE_NUMBER_INT)))) :
-            $return['attachments'] = (int) $attachment;
+            $return['attachments'] = new stdClass();
+            $return['attachments']->number = (int) $attachment;
+            $return['attachments']->Attachment = null;
+            if (array_key_exists($attachment, $this->Attachments)) :
+                $return['attachments']->Attachment = $this->Attachments[$attachment];
+            endif;
             unset($answers[0]);
         else :
             throw new Exception("Unrecognised answer intro $answerIntro");
@@ -121,6 +190,19 @@ class Quiz
             $return['answers'][] = new Answer($i, $answer[1], $isCorrect);
         endforeach;
         return $return;
+    }
+    private function parseAttachments($pdfPage)
+    {
+        $attachments = array();
+        $XObjects = $pdfPage->getXObjects();
+        $XObjects = XObjectFilter::getObjectsByType($XObjects, 'XObject', 'Image');
+        if (empty($XObjects)) :
+            return;
+        endif;
+        foreach ($XObjects as $XObject) :
+            $attachments[] = Attachment::createFromXObject($XObject);
+        endforeach;
+        return XObjectFilter::reduceDuplicateAttachments($attachments);
     }
 
     private function parseQuestions()
@@ -144,6 +226,8 @@ class Quiz
             } catch (Exception $ex) {
                 throw new Exception("Error parsing answers in question $questionNumber", null, $ex->getMessage());
             }
+
+            //$this->Questions[$questionNumber] = new Question();
             $this->Questions[$questionNumber] = new Question($questionNumber, $questionText, $answers['answers'], $answers['attachments']);
         endforeach;
         return $this->Questions;
@@ -154,7 +238,9 @@ class Quiz
     */
     private function parsePdf()
     {
+        $skipAttachmentPage = false; // see edge case empty attachment page below
         $pdf = $this->parser->parseFile($this->sourceFile);
+        $this->Details = $pdf->getDetails();
         $pages  = $pdf->getPages();
         $i = 0;
         $fullText = '';
@@ -165,9 +251,26 @@ class Quiz
             endif;
             $s = $page->getText();
             // cut the header, e.g.  \t90 – Navigation\t \tECQB\t-PPL(A)\t \t\nv20\t20.2 \t \t3 \t
-            if (preg_match($this->getIntroPattern(), $s, $matchesIntro)) {
+            if (preg_match($this->getIntroPattern(), $s, $matchesIntro)) :
                 $s = str_replace($matchesIntro[1], '', $s); // substr might be simpler maybe. Do we trust the length? Guess this will work.
-            }
+            elseif (preg_match($this->getAttachmentPattern(), $s, $matchesAttachments)) :
+                if (!is_numeric(($attachmentNumber = filter_var($matchesAttachments[1], FILTER_SANITIZE_NUMBER_INT)))) :
+                    trigger_error("Unable to extract attachment number from $s", E_USER_NOTICE);
+                endif;
+                $attachmentNumber = (int) $attachmentNumber;
+                // edge case in Nav; actual attachment may be on a page after the intro (e.g. Att Page 3 = Anlage 3 + blank page, Page 4 is the image)
+                $attachment = $this->parseAttachments($page);
+                if (empty($attachment)) :
+                    $skipAttachmentPage = true;
+                    continue;
+                endif;
+                $this->Attachments[$attachmentNumber] = $attachment;
+                // in theory, all further pages should be attachments. What do we do?
+            elseif ($skipAttachmentPage) :  // see edge case nav chart "Anlage 3")
+                $skipAttachmentPage = false;
+                $attachment = $this->parseAttachments($page);
+                $this->Attachments[$attachmentNumber] = $attachment;
+            endif;
             $fullText .= $s;
         endforeach;
         $this->fullText = $fullText;
@@ -190,7 +293,7 @@ class quizParser
     private $sourceDirectory = '';
     private $pdfParser = null;
     private $quizes = array();
-    public function __construct($sourceDirectory, $pdfParser)
+    public function __construct($sourceDirectory, \Smalot\PdfParser\Parser $pdfParser)
     {
         $this->sourceDirectory = $sourceDirectory;
         $this->pdfParser = $pdfParser;
@@ -205,7 +308,14 @@ class quizParser
             endif;
             $quiz = new Quiz($file->getPathname(), $this->pdfParser);
             try {
-                $this->quizes[] = $quiz->getQuestions();
+                $details = $quiz->getDetails();
+                // add file details - do we need anything else?
+                $details['OriginalFileName'] = $file->getFilename();
+                $questions = $quiz->getQuestions();
+                $return = new stdClass();
+                $return->Details = $details;
+                $return->Questions = $questions;
+                $this->quizes[] = $return;
             } catch (Exception $ex) {
                 trigger_error("Caught exception: ".$ex->getMessage()." in ".$file->getFilename(), E_USER_NOTICE);
             }
@@ -216,15 +326,15 @@ class quizParser
 
 }
 
-error_reporting(E_ALL & ~E_NOTICE & ~E_USER_NOTICE); // Ignore notices we throw in quizParser to not screw up the headers
+error_reporting(E_ALL & ~E_NOTICE & ~E_USER_NOTICE);
 // Include Composer autoloader if not already done.
 include 'vendor/autoload.php';
 // Parse pdf file and build necessary objects.
 $parser = new \Smalot\PdfParser\Parser();
 
 /*
-// run a single catalog for troubleshooting
-$quiz = new Quiz('./pdf/PPL(A)/ECQB-PPL-40-COM-PPLA-DE.pdf', $parser);
+//$quiz = new Quiz('./pdf/PPL(A)/ECQB-PPL-40-COM-PPLA-DE.pdf', $parser);
+$quiz = new Quiz('./pdf/PPL(A)/ECQB-PPL-90-NAV-PPLA-DE-DE.pdf', $parser);
 header('Content-Type: application/json');
 echo $quiz->getJson();
 die();
