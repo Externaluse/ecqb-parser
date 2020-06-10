@@ -1,4 +1,55 @@
 <?php
+interface IOutputFormatter {
+    public function toString(Quiz $quiz);
+}
+abstract class OutputFormatter implements IOutputFormatter
+{
+    public $Quiz;
+    abstract public function toString(Quiz $quiz);
+}
+class JsonOutputFormatter extends OutputFormatter implements IOutputFormatter
+{
+    public function toString(Quiz $quiz)
+    {
+        $this->Quiz = $quiz;
+        $details = $this->Quiz->getDetails();
+        $questions = $this->Quiz->getQuestions();
+        $json = new stdClass();
+        $json->Details = $details;
+        $json->Questions = $questions;
+        header('Content-Type: application/json');
+        echo json_encode($json);
+    }
+}
+class DieckwischOutputFormatter extends OutputFormatter implements IOutputFormatter
+{
+    public function toString(Quiz $quiz)
+    {
+        $return = '';
+        $this->Quiz = $quiz;
+        $details = $this->Quiz->getDetails();
+        $return .= sprintf('<h1>Details for Catalog %s</h1>', $details["OriginalFileName"]);
+        $questions = $this->Quiz->getQuestions();
+        $spacer = '--!';
+        $answerTemplate = array(true => '#!', false => '#?');
+        foreach ($questions as $question) :
+            if ($question->Number !== 1) : // there must not be a --! for the first question.
+                $return .= sprintf($spacer."\r\n");
+            endif;
+            $return .= sprintf("%d %s\r\n", $question->Number, $question->Text);
+            foreach ($question->Answers as $answer) :
+                $return .= sprintf("%s %s\r\n", $answerTemplate[$answer->IsCorrect], $answer->Text);
+            endforeach;
+            if (!empty($question->Attachments)) :
+                $attachment = $question->Attachments->Attachment[0];
+                $attachmentString = sprintf('<img src="data:image/jpg;base64%s" alt="Anlage %d" title="Anlage %d"/>'."\r\n", $attachment->Content, $question->Attachments->number, $question->Attachments->number);
+                $return .= $attachmentString;
+                // $return .= htmlentities($attachmentString); // add it again in case we want to copy it as source (too bloated)
+            endif;
+        endforeach;
+    }
+}
+
 class XObjectFilter
 {
     /**
@@ -104,6 +155,7 @@ class Question
 
 class Quiz
 {
+    private $OutputFormatter = null;
     private $Questions = array();
     private $Details = array();
     private $Attachments = array();
@@ -143,6 +195,12 @@ class Quiz
             $this->skipPages = $skipPages;
         endif;
         $this->parsePdf();
+        $this->Details['OriginalFileName'] = $sourceFile;
+        $this->OutputFormatter = new JsonOutputFormatter(); // default formatter
+    }
+    public function setOutputFormatter(IOutputFormatter $outputFormatter)
+    {
+        $this->OutputFormatter = $outputFormatter;
     }
     public function getDetails()
     {
@@ -276,10 +334,9 @@ class Quiz
         $this->fullText = $fullText;
     }
 
-    public function getJson()
+    public function __toString()
     {
-        $return = $this->parseQuestions();
-        return json_encode($return);
+        return $this->OutputFormatter->toString($this);
     }
 
     public function getFullText()
@@ -308,22 +365,13 @@ class quizParser
             endif;
             $quiz = new Quiz($file->getPathname(), $this->pdfParser);
             try {
-                $details = $quiz->getDetails();
-                // add file details - do we need anything else?
-                $details['OriginalFileName'] = $file->getFilename();
-                $questions = $quiz->getQuestions();
-                $return = new stdClass();
-                $return->Details = $details;
-                $return->Questions = $questions;
-                $this->quizes[] = $return;
+                $this->quizes[] = $quiz;
             } catch (Exception $ex) {
                 trigger_error("Caught exception: ".$ex->getMessage()." in ".$file->getFilename(), E_USER_NOTICE);
             }
-
         }
         return $this->quizes;
     }
-
 }
 
 error_reporting(E_ALL & ~E_NOTICE & ~E_USER_NOTICE);
@@ -342,6 +390,9 @@ die();
 
 $quizParser = new quizParser('./pdf/PPL(A)/', $parser);
 $quizes = $quizParser->parseDirectory();
-header('Content-Type: application/json');
-echo json_encode($quizes);
+$outputFormatter = new DieckwischOutputFormatter();
+foreach ($quizes as $quiz) :
+    $quiz->setOutputFormatter($outputFormatter);
+    echo $quiz;
+endforeach;
 ?>
