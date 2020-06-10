@@ -18,7 +18,7 @@ class JsonOutputFormatter extends OutputFormatter implements IOutputFormatter
         $json->Details = $details;
         $json->Questions = $questions;
         header('Content-Type: application/json');
-        echo json_encode($json);
+        return json_encode($json);
     }
 }
 class DieckwischOutputFormatter extends OutputFormatter implements IOutputFormatter
@@ -47,6 +47,7 @@ class DieckwischOutputFormatter extends OutputFormatter implements IOutputFormat
                 // $return .= htmlentities($attachmentString); // add it again in case we want to copy it as source (too bloated)
             endif;
         endforeach;
+        return $return;
     }
 }
 
